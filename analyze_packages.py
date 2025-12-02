@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+ #!/usr/bin/env python3
 """
 Script to analyze malicious packages from Shai-Hulud CSV and find projects
 using them in DependencyTrack.
@@ -13,8 +13,12 @@ from typing import Dict, List, Tuple
 from urllib.parse import urljoin
 
 # DependencyTrack API base URL
-DT_BASE_URL = "https://dependencytrack.com"
+DT_BASE_URL = os.getenv("DT_BASE_URL")
 DT_API_TOKEN = os.getenv("DT_API_TOKEN")
+
+if not DT_BASE_URL:
+    print("Error: DT_BASE_URL environment variable is not set", file=sys.stderr)
+    sys.exit(1)
 
 if not DT_API_TOKEN:
     print("Error: DT_API_TOKEN environment variable is not set", file=sys.stderr)
@@ -94,24 +98,101 @@ def check_and_exit_on_error(response: requests.Response, context: str = ""):
 
 
 def get_all_projects() -> List[Dict]:
-    """Get all projects from DependencyTrack."""
-    url = urljoin(DT_BASE_URL, "/api/v1/project")
+    """Get all projects from DependencyTrack, handling pagination."""
+    base_url = urljoin(DT_BASE_URL, "/api/v1/project")
+    all_projects = []
+    page_size = 100
+    page_number = 1
 
     try:
-        response = requests.get(url, headers=HEADERS, timeout=30)
+        # First request to get total count
+        params = {'pageNumber': str(page_number), 'pageSize': str(page_size)}
+        response = requests.get(base_url, headers=HEADERS, params=params, timeout=30)
         check_and_exit_on_error(response, "getting projects")
         response.raise_for_status()
+
+        # Get total count from header
+        total_count_header = response.headers.get('X-Total-Count')
+        if total_count_header:
+            try:
+                total_count = int(total_count_header)
+            except ValueError:
+                total_count = None
+        else:
+            total_count = None
+
+        # Process first page
         try:
             data = response.json()
         except json.JSONDecodeError:
             print(f"Non-JSON response when getting projects: {response.text[:200]}", file=sys.stderr)
             return []
+
         # Handle both list and paginated response
         if isinstance(data, list):
-            return data
+            all_projects.extend(data)
         elif isinstance(data, dict) and 'items' in data:
-            return data['items']
-        return []
+            all_projects.extend(data['items'])
+
+        # If we got total count, calculate pages needed
+        if total_count is not None:
+            total_pages = (total_count + page_size - 1) // page_size  # Ceiling division
+            print(f"Found {total_count} total projects across {total_pages} page(s)")
+
+            # Fetch remaining pages
+            for page_number in range(2, total_pages + 1):
+                params = {'pageNumber': str(page_number), 'pageSize': str(page_size)}
+                response = requests.get(base_url, headers=HEADERS, params=params, timeout=30)
+                check_and_exit_on_error(response, f"getting projects page {page_number}")
+                response.raise_for_status()
+
+                try:
+                    data = response.json()
+                except json.JSONDecodeError:
+                    print(f"Non-JSON response when getting projects page {page_number}: {response.text[:200]}", file=sys.stderr)
+                    continue
+
+                if isinstance(data, list):
+                    all_projects.extend(data)
+                elif isinstance(data, dict) and 'items' in data:
+                    all_projects.extend(data['items'])
+        else:
+            # If no total count header, check if we got a full page
+            # If we got less than page_size, we're done
+            if len(all_projects) < page_size:
+                print(f"Found {len(all_projects)} projects (no pagination info)")
+            else:
+                # Keep fetching until we get less than page_size items
+                print(f"Found at least {len(all_projects)} projects (fetching all pages...)")
+                while True:
+                    page_number += 1
+                    params = {'pageNumber': str(page_number), 'pageSize': str(page_size)}
+                    response = requests.get(base_url, headers=HEADERS, params=params, timeout=30)
+                    check_and_exit_on_error(response, f"getting projects page {page_number}")
+                    response.raise_for_status()
+
+                    try:
+                        data = response.json()
+                    except json.JSONDecodeError:
+                        print(f"Non-JSON response when getting projects page {page_number}: {response.text[:200]}", file=sys.stderr)
+                        break
+
+                    page_projects = []
+                    if isinstance(data, list):
+                        page_projects = data
+                    elif isinstance(data, dict) and 'items' in data:
+                        page_projects = data['items']
+
+                    if not page_projects:
+                        break
+
+                    all_projects.extend(page_projects)
+
+                    # If we got less than page_size, we're on the last page
+                    if len(page_projects) < page_size:
+                        break
+
+        return all_projects
     except requests.exceptions.RequestException as e:
         print(f"Error getting projects: {e}", file=sys.stderr)
         return []
@@ -150,41 +231,117 @@ def save_cache(cache: Dict[str, List[Dict]]):
 
 
 def get_project_components(project_uuid: str, cache: Dict[str, List[Dict]] = None) -> List[Dict]:
-    """Get all components for a project, using cache if available and enabled."""
+    """Get all components for a project, handling pagination and using cache if available and enabled."""
     # Check cache first (only if caching is enabled)
     if ENABLE_CACHE and cache is not None and project_uuid in cache:
         return cache[project_uuid]
 
-    # Fetch from API
-    url = urljoin(DT_BASE_URL, f"/api/v1/component/project/{project_uuid}")
+    # Fetch from API with pagination
+    base_url = urljoin(DT_BASE_URL, f"/api/v1/component/project/{project_uuid}")
+    all_components = []
+    page_size = 100
+    page_number = 1
 
     try:
-        response = requests.get(url, headers=HEADERS, timeout=30)
+        # First request to get total count
+        params = {'pageNumber': str(page_number), 'pageSize': str(page_size)}
+        response = requests.get(base_url, headers=HEADERS, params=params, timeout=30)
         check_and_exit_on_error(response, f"getting components for project {project_uuid}")
+
         if response.status_code == 404:
             components = []
-        else:
-            response.raise_for_status()
+            if ENABLE_CACHE and cache is not None:
+                cache[project_uuid] = components
+            return components
+
+        response.raise_for_status()
+
+        # Get total count from header
+        total_count_header = response.headers.get('X-Total-Count')
+        if total_count_header:
             try:
-                data = response.json()
-            except json.JSONDecodeError:
-                print(f"Non-JSON response when getting components for project {project_uuid}: {response.text[:200]}", file=sys.stderr)
-                components = []
-            else:
+                total_count = int(total_count_header)
+            except ValueError:
+                total_count = None
+        else:
+            total_count = None
+
+        # Process first page
+        try:
+            data = response.json()
+        except json.JSONDecodeError:
+            print(f"Non-JSON response when getting components for project {project_uuid}: {response.text[:200]}", file=sys.stderr)
+            return []
+
+        # Handle both list and paginated response
+        if isinstance(data, list):
+            all_components.extend(data)
+        elif isinstance(data, dict) and 'items' in data:
+            all_components.extend(data['items'])
+        elif isinstance(data, dict):
+            all_components.append(data)
+
+        # If we got total count, calculate pages needed
+        if total_count is not None:
+            total_pages = (total_count + page_size - 1) // page_size  # Ceiling division
+
+            # Fetch remaining pages
+            for page_number in range(2, total_pages + 1):
+                params = {'pageNumber': str(page_number), 'pageSize': str(page_size)}
+                response = requests.get(base_url, headers=HEADERS, params=params, timeout=30)
+                check_and_exit_on_error(response, f"getting components for project {project_uuid} page {page_number}")
+                response.raise_for_status()
+
+                try:
+                    data = response.json()
+                except json.JSONDecodeError:
+                    print(f"Non-JSON response when getting components for project {project_uuid} page {page_number}: {response.text[:200]}", file=sys.stderr)
+                    continue
+
                 if isinstance(data, list):
-                    components = data
+                    all_components.extend(data)
                 elif isinstance(data, dict) and 'items' in data:
-                    components = data['items']
-                elif isinstance(data, dict):
-                    components = [data]
-                else:
-                    components = []
+                    all_components.extend(data['items'])
+        else:
+            # If no total count header, check if we got a full page
+            # If we got less than page_size, we're done
+            if len(all_components) < page_size:
+                pass  # Already have all components
+            else:
+                # Keep fetching until we get less than page_size items
+                while True:
+                    page_number += 1
+                    params = {'pageNumber': str(page_number), 'pageSize': str(page_size)}
+                    response = requests.get(base_url, headers=HEADERS, params=params, timeout=30)
+                    check_and_exit_on_error(response, f"getting components for project {project_uuid} page {page_number}")
+                    response.raise_for_status()
+
+                    try:
+                        data = response.json()
+                    except json.JSONDecodeError:
+                        print(f"Non-JSON response when getting components for project {project_uuid} page {page_number}: {response.text[:200]}", file=sys.stderr)
+                        break
+
+                    page_components = []
+                    if isinstance(data, list):
+                        page_components = data
+                    elif isinstance(data, dict) and 'items' in data:
+                        page_components = data['items']
+
+                    if not page_components:
+                        break
+
+                    all_components.extend(page_components)
+
+                    # If we got less than page_size, we're on the last page
+                    if len(page_components) < page_size:
+                        break
 
         # Store in cache (only if caching is enabled)
         if ENABLE_CACHE and cache is not None:
-            cache[project_uuid] = components
+            cache[project_uuid] = all_components
 
-        return components
+        return all_components
     except requests.exceptions.RequestException as e:
         if hasattr(e, 'response') and e.response.status_code == 404:
             components = []
@@ -442,6 +599,63 @@ def main():
     print(f"\n1. Projects using packages (any version): {len(stats['total_projects_any_version'])}")
     print(f"2. Projects using exact malicious versions: {len(stats['total_projects_exact_version'])}")
     print(f"3. Projects using same major version: {len(stats['total_projects_major_version'])}")
+
+    # Calculate statistics by source (WIZ vs TRICON)
+    wiz_packages = set()
+    tricon_packages = set()
+    wiz_projects_any = set()
+    wiz_projects_exact = set()
+    wiz_projects_major = set()
+    tricon_projects_any = set()
+    tricon_projects_exact = set()
+    tricon_projects_major = set()
+
+    for pkg_detail in stats['package_details']:
+        source = pkg_detail.get('source', 'Unknown')
+        pkg_name = pkg_detail['package']
+
+        # Track packages by source
+        if source == 'CSV' or source == 'CSV+JSON':
+            wiz_packages.add(pkg_name)
+        if source == 'JSON' or source == 'CSV+JSON':
+            tricon_packages.add(pkg_name)
+
+        # Track projects by source
+        for proj in pkg_detail['projects_any_version']['projects']:
+            proj_uuid = proj['uuid']
+            if source == 'CSV' or source == 'CSV+JSON':
+                wiz_projects_any.add(proj_uuid)
+            if source == 'JSON' or source == 'CSV+JSON':
+                tricon_projects_any.add(proj_uuid)
+
+        for proj in pkg_detail['projects_exact_version']['projects']:
+            proj_uuid = proj['uuid']
+            if source == 'CSV' or source == 'CSV+JSON':
+                wiz_projects_exact.add(proj_uuid)
+            if source == 'JSON' or source == 'CSV+JSON':
+                tricon_projects_exact.add(proj_uuid)
+
+        for proj in pkg_detail['projects_major_version']['projects']:
+            proj_uuid = proj['uuid']
+            if source == 'CSV' or source == 'CSV+JSON':
+                wiz_projects_major.add(proj_uuid)
+            if source == 'JSON' or source == 'CSV+JSON':
+                tricon_projects_major.add(proj_uuid)
+
+    # Print source-specific statistics
+    print("\n" + "-"*80)
+    print("BY SOURCE")
+    print("-"*80)
+    print("\nWIZ (CSV):")
+    print(f"  Packages found: {len(wiz_packages)}")
+    print(f"  Projects using packages (any version): {len(wiz_projects_any)}")
+    print(f"  Projects using exact malicious versions: {len(wiz_projects_exact)}")
+    print(f"  Projects using same major version: {len(wiz_projects_major)}")
+    print("\nTRICON (JSON):")
+    print(f"  Packages found: {len(tricon_packages)}")
+    print(f"  Projects using packages (any version): {len(tricon_projects_any)}")
+    print(f"  Projects using exact malicious versions: {len(tricon_projects_exact)}")
+    print(f"  Projects using same major version: {len(tricon_projects_major)}")
 
     # Print detailed summary table
     if stats['package_details']:

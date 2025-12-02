@@ -23,7 +23,7 @@ docker build -t shai-hulud-analyzer .
 
 2. Run the container with the DependencyTrack API token:
 ```bash
-docker run --rm -e DT_API_TOKEN=your_token_here -v $(pwd):/app/output shai-hulud-analyzer
+docker run --rm -e DT_API_TOKEN=your_token_here -e DT_BASE_URL=https://your-dependencytrack-instance.com -v $(pwd):/app/output shai-hulud-analyzer
 ```
 
 The results will be saved to:
@@ -37,9 +37,10 @@ The results will be saved to:
 pip install -r requirements.txt
 ```
 
-2. Set the environment variable and run:
+2. Set the environment variables and run:
 ```bash
 export DT_API_TOKEN=your_token_here
+export DT_BASE_URL=https://your-dependencytrack-instance.com
 python analyze_packages.py
 ```
 
@@ -53,6 +54,7 @@ The script generates two JSON files:
 ## Environment Variables
 
 - `DT_API_TOKEN`: Required. DependencyTrack API token for authentication.
+- `DT_BASE_URL`: Required. DependencyTrack API base URL.
 - `ENABLE_CACHE`: Optional. Enable caching of component data to `cache.json`. Set to `true`, `1`, or `yes` to enable. Defaults to disabled (cache is not used).
 
 ## Caching
@@ -71,13 +73,14 @@ When caching is enabled:
 
 **Using Docker:**
 ```bash
-docker run --rm -e DT_API_TOKEN=your_token_here -e ENABLE_CACHE=true -v $(pwd):/app/output shai-hulud-analyzer
+docker run --rm -e DT_API_TOKEN=your_token_here -e DT_BASE_URL=https://your-dependencytrack-instance.com -e ENABLE_CACHE=true -v $(pwd):/app/output shai-hulud-analyzer
 ```
 
 **Using Python directly:**
 ```bash
-export ENABLE_CACHE=true
 export DT_API_TOKEN=your_token_here
+export DT_BASE_URL=https://your-dependencytrack-instance.com
+export ENABLE_CACHE=true
 python analyze_packages.py
 ```
 
