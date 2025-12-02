@@ -1,5 +1,8 @@
 # VIBE coded so no warranties!
-The Vibe is strong on this one.
+The Vibe is strong on this one. The problem with Deptracks API is you can not:
+- get a list of projects using a certain component only by its name. it does some kind of "like" in sql giving you too many things and you need to filter clientside. wouldn't be performant anyway with almost 10000 components.
+- get a list of all components in deptrack. not possible for unknown reasons.
+so we try the approach to get the list of projects and then for each project get the components.
 
 # Shai-Hulud Package Analysis
 
